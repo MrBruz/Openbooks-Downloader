@@ -1,2 +1,5 @@
 isbnlib
 ebooklib
+requests
+certifi
+lxml
