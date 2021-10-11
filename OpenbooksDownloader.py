@@ -8,6 +8,7 @@ import requests, json, textwrap, html, os, isbnlib, statistics, subprocess, time
 from difflib import SequenceMatcher
 from ebooklib import epub 
 from sys import platform
+import xml.etree.ElementTree as ET
 
 if platform == "win32":
     executable = "openbooks.exe"
@@ -40,9 +41,7 @@ def generateOverallMatch(fuzzyMatches):
     descWeight = 0.7
     
     totalWeights = titleWeight + authorWeight + descWeight
-    
     confidence = (((fuzzyMatches[0] * titleWeight) + (fuzzyMatches[1] * authorWeight) + (fuzzyMatches[2] * descWeight)) / totalWeights)
-    
     return "{:.2%}".format(confidence)
 
 def search(targetTitle, targetAuthors):
@@ -69,12 +68,14 @@ def fallBackToNextBook():
     if epubFileName.strip() != "":
         os.remove(epubFileName)
     validBooks.remove(downloadCommand)
+    if len(validBooks) == 0:
+        print("Could not find any valid books that matched the criteria...")
+        exit()
     downloadCommand = min(validBooks, key=len)
-    time.sleep(1)
     clearScreen()
 
 def checkEmbeddedLanguage(book):
-    if "en" in book.get_metadata('DC', 'language')[0][0] or book.get_metadata('DC', 'language')[0][0].startswith("en-"):
+    if lang in book.get_metadata('DC', 'language')[0][0] or book.get_metadata('DC', 'language')[0][0].startswith(lang + "-"):
         return True
     else:
         return False
@@ -104,7 +105,14 @@ def getLanguage(data):
 def getISBN(data):
     return convertToISBN13(data["volumeInfo"]["industryIdentifiers"][0]['identifier'])
  
-
+def checkForSimilarISBNS(isbn):
+    request = requests.get("https://www.librarything.com/api/thingISBN/" + isbn)
+    root = ET.ElementTree(ET.fromstring(request.content.decode())).getroot()
+    relatedIsbns = []
+    for child in root:
+        relatedIsbns.append(child.text)
+    return relatedIsbns
+    
  
 ###
 #
@@ -116,6 +124,9 @@ searchInput = input("Enter search: ")
 targetISBN = -1
 response = requests.get("https://www.googleapis.com/books/v1/volumes?q=" + searchInput)
 info = json.loads(response.content.decode())
+if info['totalItems'] == 0:
+    print("No book results with query...")
+    exit()
 clearScreen()
 
 for volume_info in info['items']:
@@ -140,9 +151,17 @@ for volume_info in info['items']:
         else:
             clearScreen()
     
+if targetISBN == -1:
+    clearScreen()
+    print("No book results remaining...")
+    exit()
+
 openbooksSearchFile = search(targetTitle, targetAuthors)
 clearScreen()
 validBooks = scrapeSearchResults(openbooksSearchFile)
+if len(validBooks) == 0:
+    print("No results for this book that we could download...")
+    exit()
 downloadCommand = min(validBooks, key=len)
 
 while True:
@@ -150,7 +169,7 @@ while True:
         epubFileName = downloadEbook(downloadCommand)
         book = epub.read_epub(epubFileName)
     except:
-        print("\n\nFAILED TO DOWNLOAD, FALLING BACK TO NEXT BOOK.")
+        #print("\n\nFAILED TO DOWNLOAD, FALLING BACK TO NEXT BOOK.")
         fallBackToNextBook()
     else:
         try:
@@ -158,12 +177,12 @@ while True:
             if isbn.strip() == "":
                 raise 
         except:
-            print("\n\nEXTRACTING METADATA FAILED, FALLING BACK TO NEXT BOOK.")
+            #print("\n\nEXTRACTING METADATA FAILED, FALLING BACK TO NEXT BOOK.")
             fallBackToNextBook()
         else:
             if checkEmbeddedLanguage(book):
-                if(isbn == targetISBN):
-                    print("\n\n100% MATCH!")
+                similarISBNS = checkForSimilarISBNS(isbn)
+                if isbn == targetISBN or targetISBN in similarISBNS or isbnlib.to_isbn10(targetISBN) in similarISBNS:
                     break
                 else:
                     response = requests.get("https://www.googleapis.com/books/v1/volumes?q=isbn:" + isbn)
@@ -171,31 +190,34 @@ while True:
                     if info['totalItems'] != 0:
                         volume_info = info["items"][0]
                         if getLanguage(volume_info) == lang:
-                            print("\n\n" + prepareAndRunFuzzyMatching(targetTitle, getTitle(volume_info), targetAuthors, getAuthors(volume_info, " "), targetDesc, getDesc(volume_info)), "MATCH!")
-                            break
+                            matchPercentage = prepareAndRunFuzzyMatching(targetTitle, getTitle(volume_info), targetAuthors, getAuthors(volume_info, " "), targetDesc, getDesc(volume_info))
+                            
+                            print("\n\n***")
+                            print("\nTitle:", getTitle(volume_info))
+                            print("\nSummary:\n")
+                            print(textwrap.fill(getDesc(volume_info), width=65))
+                            print("\nAuthor(s):", getAuthors(volume_info))
+                            print("\nPage count:", getPageCount(volume_info))
+                            print("\nLanguage:", getLanguage(volume_info))
+                            print("\n***")
+                            
+                            correctBookQuery = input("This book is only a", matchPercentage, "match, does this still seem like the correct book? (y/n)")
+                            if correctBookQuery.lower().startswith("y"):
+                                break
+                            else:
+                                fallBackToNextBook()
                         else:
-                            print("\n\nBOOK DOES NOT MEET REQUIRED LANGUAGE, FALLING BACK TO NEXT BOOK.")
+                            #print("\n\nBOOK DOES NOT MEET REQUIRED LANGUAGE, FALLING BACK TO NEXT BOOK.")
                             fallBackToNextBook()
                     else:
-                        print("\n\nMETADATA QUERY FAILED, FALLING BACK TO NEXT BOOK.")
+                        #print("\n\nMETADATA QUERY FAILED, FALLING BACK TO NEXT BOOK.")
                         fallBackToNextBook()
             else:
-                print("\n\nBOOK DOES NOT MEET REQUIRED LANGUAGE, FALLING BACK TO NEXT BOOK.")
+                #print("\n\nBOOK DOES NOT MEET REQUIRED LANGUAGE, FALLING BACK TO NEXT BOOK.")
                 fallBackToNextBook()
             
-            
-            
-            
-print("\n\n***")
-print("\nTitle:", getTitle(volume_info))
-print("\nSummary:\n")
-print(textwrap.fill(getDesc(volume_info), width=65))
-print("\nAuthor(s):", getAuthors(volume_info))
-print("\nPage count:", getPageCount(volume_info))
-print("\nLanguage:", getLanguage(volume_info))
-print("\n***")
-            
-            
+clearScreen()
+print("Book successfully downloaded!")
 addToCalibre = input("\n\nAdd this book to calibre? (y/n):")
 if addToCalibre.lower().startswith("y"):
     subprocess.run(["calibredb", "add", epubFileName])
